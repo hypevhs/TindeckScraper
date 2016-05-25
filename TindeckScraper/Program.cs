@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Net;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
@@ -12,6 +13,9 @@ namespace TindeckScraper
 {
     internal static class Program
     {
+        private static IBrowsingContext _browsingContext;
+        private static WebClient _webClient;
+
         [STAThread]
         private static void Main(string[] args)
         {
@@ -21,9 +25,9 @@ namespace TindeckScraper
         private static async Task MainAsync()
         {
             //setup
-            var conf = Configuration.Default.WithDefaultLoader();
-            var url = "http://tindeck.com/users/geckoyamori";
-            var doc = await BrowsingContext.New(conf).OpenAsync(url);
+            _browsingContext = BrowsingContext.New(Configuration.Default.WithDefaultLoader());
+            _webClient = new WebClient();
+            var doc = await _browsingContext.OpenAsync("http://tindeck.com/users/geckoyamori");
 
             //get track links
             var tracklinks = doc.QuerySelectorAll("#usrlist" +
@@ -45,39 +49,47 @@ namespace TindeckScraper
                 Console.WriteLine($"Track: {trackName,50}");
 
                 var trackHref = track.GetAttribute("href");
-                string trackId;
-                if (TryHrefToId(trackHref, out trackId))
-                {
-                    Console.WriteLine("Track is broken.");
-                    continue;
-                }
-
-                var result = DownloadTrackById(trackId);
+                var trackId = HrefToId(trackHref);
+                await DownloadTrackById(trackId);
             }
 
             Console.ReadLine();
         }
 
-        private static bool DownloadTrackById(string trackId)
+        private static async Task<bool> DownloadTrackById(string trackId)
         {
-            var url = $"http://tindeck.com/dl/{trackId}";
-            //TODO
-            return false;
+            var doc = await _browsingContext.OpenAsync($"http://tindeck.com/dl/{trackId}");
+            var queryResults = doc.QuerySelectorAll("div.content span a[href*=download]");
+            var directLinkEl = queryResults.FirstOrDefault();
+            if (directLinkEl == null)
+                return false;
+            var downloadUrl = directLinkEl.GetAttribute("href");
+            DownloadUrl(doc.Origin + downloadUrl, trackId);
+            return true;
         }
 
-        private static bool TryHrefToId(string trackHref, out string trackId)
+        private static void DownloadUrl(string trackUrl, string trackId)
         {
-            trackId = string.Empty;
+            var fileName = trackId + GetBaseNameFromUrl(trackUrl);
+            Console.WriteLine($"Downloading to {fileName}...");
+            _webClient.DownloadFile(new Uri(trackUrl), fileName);
+        }
 
+        private static string GetBaseNameFromUrl(string trackUrl)
+        {
+            return trackUrl.Substring(trackUrl.LastIndexOf("/", StringComparison.Ordinal) + 1);
+        }
+
+        private static string HrefToId(string trackHref)
+        {
             //extract with regex
             var re = new Regex("/listen/(.*)");
             var matches = re.Match(trackHref);
             if (!matches.Success)
-                return false;
+                throw new FormatException();
 
             //get the capture group
-            trackId = matches.Groups[1].Value;
-            return true;
+            return matches.Groups[1].Value;
         }
 
         /// <summary>
@@ -85,37 +97,34 @@ namespace TindeckScraper
         /// </summary>
         private static bool FoundExpectedNumber(IDocument doc, int howManyFound)
         {
-            int resultCount;
-            if (!TryGetTableHeader(doc, out resultCount)) return false;
+            var tableHeaderCount = GetTableHeader(doc);
 
             //compare expected,actual
-            return resultCount == howManyFound;
+            return tableHeaderCount == howManyFound;
         }
 
         /// <summary>
         /// Get the table header that says "Uploads (123)"
         /// </summary>
-        private static bool TryGetTableHeader(IDocument doc, out int resultCount)
+        private static int GetTableHeader(IDocument doc)
         {
-            resultCount = -1;
-
             //get the element
             var countElement = doc.QuerySelectorAll("#upla").FirstOrDefault();
             if (countElement == null)
-                return false;
+                throw new FormatException();
 
             //extract with regex
             var re = new Regex(@".*\((\d+)\).*");
             var matches = re.Match(countElement.InnerHtml);
             if (!matches.Success)
-                return false;
+                throw new FormatException();
 
             //get the capture group
             var firstGroup = matches.Groups[1];
             var countText = firstGroup.Value;
 
             //parse into int
-            return int.TryParse(countText, out resultCount);
+            return int.Parse(countText);
         }
     }
 }
